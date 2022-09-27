@@ -1,0 +1,10 @@
+[
+    {
+        "wallet": "",
+        "grant_type": "Daily",
+        "start": null,
+        "periods": 1,
+        "allow_clawback": true,
+        "amount": 2000000
+    }
+]
