@@ -1,10 +1,14 @@
-[
-    {
-        "wallet": "",
-        "grant_type": "Daily",
-        "start": null,
-        "periods": 1,
-        "allow_clawback": true,
-        "amount": 2000000
-    }
-]
+{
+    "name": "Bla",
+    "description": "Blabla",
+    "grants": [
+        {
+            "wallet": "",
+            "grant_type": "None",
+            "start": null,
+            "periods": 0,
+            "allow_clawback": true,
+            "amount": 1000000
+        }
+    ]
+}
