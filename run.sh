@@ -2,9 +2,10 @@
 
 export $(xargs < .env)
 
-while getopts w:g:n: flag
+while getopts c:w:g:n: flag
 do
     case "${flag}" in
+        c) command=${OPTARG};;
         w) wallet=${OPTARG};;
         g) grants=${OPTARG};;
         n) node=${OPTARG};;
@@ -18,10 +19,14 @@ cargo build
 cd ../proposal-creator
 cargo build
 
-cd ../instruction-generator
+cd ../
 
-cargo r -- -w $wallet grant -g $grants
-
-cd ../proposal-creator
-
-cargo r -- -w $wallet -n $node create-proposal -i ../instructions.json
+if [ $command == "create-proposal" ]
+then
+    cd instruction-generator && cargo r -- -w $wallet grant -g $grants && cd ../proposal-creator && cargo r -- -w $wallet -n $node create-proposal -i ../instructions.json && cd ../
+elif [ $command == "execute" ]
+then
+    cd proposal-creator && cargo r -- -w $wallet -n $node execute -t ../transaction_to_execute.json && cd ../
+else
+    echo "Unknow command"
+fi
