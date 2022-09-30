@@ -1,23 +1,29 @@
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use borsh::{BorshDeserialize, BorshSchema, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use solana_sdk::{pubkey::Pubkey, system_program, sysvar::rent, instruction::{AccountMeta, Instruction}};
-use voter_stake_registry::state::LockupKind;
+use clap::crate_description;
 use clap::{arg, command, value_parser, ArgAction, Command};
+use serde::{Deserialize, Serialize};
 use solana_remote_wallet::locator::Locator;
 use solana_remote_wallet::remote_keypair::generate_remote_keypair;
 use solana_remote_wallet::remote_wallet::maybe_wallet_manager;
 use solana_sdk::derivation_path::DerivationPath;
 use solana_sdk::{
     self, commitment_config::CommitmentConfig, signature::Keypair, signature::Signer,
-    transaction::Transaction as SolanaTransaction, signer::keypair::read_keypair_file
+    signer::keypair::read_keypair_file, transaction::Transaction as SolanaTransaction,
+};
+use solana_sdk::{
+    instruction::{AccountMeta, Instruction},
+    pubkey::Pubkey,
+    system_program,
+    sysvar::rent,
 };
 use uriparse::URIReference;
+use voter_stake_registry::state::LockupKind;
 
 use dotenv::dotenv;
 
-use std::{env, fs, str::FromStr, path::PathBuf};
+use std::{env, fs, path::PathBuf, str::FromStr};
 
 #[derive(Clone, Debug, PartialEq, BorshDeserialize, BorshSerialize, BorshSchema)]
 #[repr(C)]
@@ -109,37 +115,25 @@ pub struct Grant {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ProposalData {
+pub struct ProposalData<T: Serialize> {
     pub name: String,
     pub description: String,
-    pub grants: Vec<Grant>,
+    pub grants: Vec<T>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Transaction {
+pub struct GrantInstruction {
     pub wallet: String,
     pub grant_type: GrantType,
     pub start: Option<u64>,
     pub periods: u32,
     pub allow_clawback: bool,
     pub amount: u64,
-    pub tx: String,
+    pub instruction: Vec<u8>,
 }
-
-pub type Transactions = Vec<Transaction>;
 
 fn main() {
     dotenv().ok();
-
-    // let grants_data = fs::read_to_string("./grants.json").unwrap();
-
-    // let grants: Grants = serde_json::from_str(&grants_data).unwrap();
-
-    // let transactions = grant_transactions(grants);
-
-    // let j = serde_json::to_string(&transactions).unwrap();
-
-    // fs::write("./transactions.json", j).unwrap();
 
     let matches = command!()
         .arg(
@@ -151,7 +145,11 @@ fn main() {
         .subcommand(
             Command::new("grant")
                 .about("creates new DAO proposal and attaches bunch of Grant transactions to it")
-                .arg(arg!(-g --grants "lists of grants to be created").required(true).action(ArgAction::Set))
+                .arg(
+                    arg!(-g --grants "lists of grants to be created")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
         )
         .get_matches();
 
@@ -162,53 +160,23 @@ fn main() {
 
         let grants_data = fs::read_to_string(grants_file).unwrap();
 
-        let grants: ProposalData = serde_json::from_str(&grants_data).unwrap();
+        let grants: ProposalData<Grant> = serde_json::from_str(&grants_data).unwrap();
+
+        let instructions = grant_instructions(&grants.grants);
+
+        let proposal_data = ProposalData {
+            name: grants.name,
+            description: grants.description,
+            grants: instructions,
+        };
+
+        let j = serde_json::to_string(&proposal_data).unwrap();
+
+        fs::write("../instructions.json", j).unwrap();
     }
 }
 
-fn create_proposal(name: String, description: String, grants: Vec<Instruction>) {
-    // to get proposal_index call RPC to get governance_data.proposals_count
-    // proposal_owner_record - Account PDA seeds: ['governance', realm, token_mint, token_owner ]
-    // governance_auth will be the wallet
-
-}
-
-fn keypair_or_ledger_of(path: &PathBuf) -> Option<Box<dyn Signer>> {
-    return if path.starts_with("usb://") {
-        let uri_invalid_msg =
-            "Failed to parse usb:// keypair path. It must be of the form 'usb://ledger?key=0'.";
-        let uri_ref = URIReference::try_from(path.to_str().unwrap()).expect(uri_invalid_msg);
-        let derivation_path = DerivationPath::from_uri_key_query(&uri_ref)
-            .expect(uri_invalid_msg)
-            .unwrap_or_default();
-        let locator = Locator::new_from_uri(&uri_ref).expect(uri_invalid_msg);
-
-        let hw_wallet = maybe_wallet_manager()
-            .expect("Remote wallet found, but failed to establish protocol. Maybe the Solana app is not open.")
-            .expect("Failed to find a remote wallet, maybe Ledger is not connected or locked.");
-
-        // When using a Ledger hardware wallet, confirm the public key of the
-        // key to sign with on its display, so users can be sure that they
-        // selected the right key.
-        let confirm_public_key = true;
-
-        Some(Box::new(
-            generate_remote_keypair(
-                locator,
-                derivation_path,
-                &hw_wallet,
-                confirm_public_key,
-                "council", /* When multiple wal
-                            lets are connected, used to display a hint */
-            )
-            .expect("Failed to contact remote wallet"),
-        ))
-    } else {
-        Some(Box::new(read_keypair_file(path.to_str().unwrap()).unwrap()))
-    };
-}
-
-pub fn grant_transactions(grants: Vec<Grant>) -> Vec<Instruction> {
+pub fn grant_instructions(grants: &Vec<Grant>) -> Vec<GrantInstruction> {
     let voter_stake_program = Pubkey::from_str(&env::var("VOTER_STAKE_PROGRAM").unwrap()).unwrap();
 
     let mint = Pubkey::from_str(&env::var("MINT").unwrap()).unwrap();
@@ -284,7 +252,17 @@ pub fn grant_transactions(grants: Vec<Grant>) -> Vec<Instruction> {
             accounts,
         };
 
-        instructions.push(instruction);
+        let instruction_bytes = bincode::serialize(&instruction).unwrap();
+
+        instructions.push(GrantInstruction {
+            wallet: grant.wallet.clone(),
+            grant_type: grant.grant_type.clone(),
+            start: grant.start,
+            periods: grant.periods,
+            allow_clawback: grant.allow_clawback,
+            amount: grant.amount,
+            instruction: instruction_bytes,
+        });
     }
 
     instructions
