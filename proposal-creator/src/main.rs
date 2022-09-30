@@ -1,3 +1,7 @@
+extern crate env_logger;
+#[macro_use]
+extern crate log;
+
 use borsh::BorshDeserialize;
 use clap::{arg, command, value_parser, ArgAction, Command};
 use dotenv::dotenv;
@@ -19,12 +23,18 @@ use spl_governance::{
     state::{
         governance::GovernanceV2,
         proposal::{get_proposal_address, VoteType},
-        proposal_transaction::InstructionData,
+        proposal_transaction::{get_proposal_transaction_address, InstructionData},
     },
 };
 use uriparse::URIReference;
 
-use std::{env, fs, path::PathBuf, str::FromStr};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+pub static RETRIES: u8 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GrantType {
@@ -67,8 +77,20 @@ pub struct ProposalTransaction {
     pub instruction: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ErroneousProposalTransactions {
+    pub governance_program: String,
+    pub governance_key: String,
+    pub proposal_address: String,
+    pub proposal_owner_record: String,
+    pub governance_authority: String,
+    pub option_index: u8,
+    pub instruction: Vec<u8>,
+}
+
 fn main() {
     dotenv().ok();
+    env_logger::init();
 
     let matches = command!()
         .arg(
@@ -93,6 +115,8 @@ fn main() {
                 ),
         )
         .get_matches();
+    // TODO: add retry command
+    // TODO: add execute command
 
     let wallet_path = matches.get_one::<PathBuf>("wallet").unwrap();
 
@@ -111,6 +135,37 @@ fn main() {
 
         create_proposal(&client, signer, &grants);
     }
+}
+
+fn send_tx_with_retry(client: &RpcClient, signer: &dyn Signer, instruction: Instruction) -> bool {
+    let mut count = RETRIES;
+    while count > 0 {
+        let blockhash = client.get_latest_blockhash().ok();
+        if let Some(blockhash) = blockhash {
+            let tx = Transaction::new_signed_with_payer(
+                &[instruction.clone()],
+                Some(&signer.try_pubkey().unwrap()),
+                &[&*signer],
+                blockhash,
+            );
+
+            let signature = client.send_and_confirm_transaction(&tx).ok();
+
+            if let Some(signature) = signature {
+                info!("New transaction was added to the proposal: {:?}", signature);
+                return true;
+            } else {
+                info!("Retrying send transaction...");
+                count -= 1;
+                continue;
+            }
+        } else {
+            info!("Retrying get latest blockhash...");
+            count -= 1;
+            continue;
+        }
+    }
+    false
 }
 
 fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalData) {
@@ -166,6 +221,7 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
         &signer.try_pubkey().unwrap(),
     );
 
+    // TODO: call through retry fn
     let blockhash = client.get_latest_blockhash().unwrap();
 
     let tx = Transaction::new_signed_with_payer(
@@ -176,14 +232,19 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
     );
     let signature = client.send_and_confirm_transaction(&tx).unwrap();
 
-    println!("Proposal was created: {:?}", signature);
+    info!("Proposal was created: {:?}", signature);
 
     let mut proposal_tx_index: u16 = 0;
 
-    // TODO: add error flag
+    let mut error_happen = false;
+
+    let mut proposal_transactions = Vec::new();
+
+    let mut erroneous_transactions = Vec::new();
 
     for grant in data.grants.iter() {
         let instruction: Instruction = bincode::deserialize(&grant.instruction).unwrap();
+        let transaction_program_id = instruction.program_id.to_string();
         let instruction_data = InstructionData::from(instruction);
 
         let insert_instruction = insert_transaction(
@@ -199,45 +260,86 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
             vec![instruction_data],
         );
 
-        // TODO: add error processing and retry
+        let tx_sent = send_tx_with_retry(client, &*signer, insert_instruction);
+
+        if tx_sent {
+            let transaction_address = get_proposal_transaction_address(
+                &governance_program,
+                &proposal_address,
+                &(0_u8).to_le_bytes(),
+                &proposal_tx_index.to_le_bytes(),
+            );
+
+            proposal_tx_index += 1;
+
+            proposal_transactions.push(ProposalTransaction {
+                address: transaction_address.to_string(),
+                transaction_program_id,
+                instruction: grant.instruction.clone(),
+            });
+        } else {
+            error_happen = true;
+
+            erroneous_transactions.push(ErroneousProposalTransactions {
+                governance_program: governance_program.to_string(),
+                governance_key: governance_key.to_string(),
+                proposal_address: proposal_address.to_string(),
+                proposal_owner_record: proposal_owner_record.to_string(),
+                governance_authority: signer.try_pubkey().unwrap().to_string(),
+                option_index: 0,
+                instruction: grant.instruction.clone(),
+            });
+        }
+    }
+
+    let transactions_to_execute = TransactionsToExecute {
+        governance: governance_key.to_string(),
+        proposal: proposal_address.to_string(),
+        transactions: proposal_transactions,
+    };
+
+    let j = serde_json::to_string(&transactions_to_execute).unwrap();
+
+    fs::write("../transaction_to_execute.json", j).unwrap();
+
+    info!("Transactions that should be executed successfully saved");
+
+    if error_happen {
+        let j = serde_json::to_string(&erroneous_transactions).unwrap();
+
+        fs::write("../erroneous_txs.json", j).unwrap();
+
+        warn!("During proposal creation error had happened, thats why proposal WAS NOT signed off");
+        info!("All the erroneous transactions were saved to erroneous_txs.json");
+        info!("You can try to insert it again with `retry` command"); // TODO: maybe redact a little
+    } else {
+        let sign_off_proposal = sign_off_proposal(
+            &governance_program,
+            &governance_data.realm,
+            &governance_key,
+            &proposal_address,
+            &signer.try_pubkey().unwrap(),
+            None,
+        );
+
         let blockhash = client.get_latest_blockhash().unwrap();
 
         let tx = Transaction::new_signed_with_payer(
-            &[insert_instruction],
+            &[sign_off_proposal],
             Some(&signer.try_pubkey().unwrap()),
             &[&*signer],
             blockhash,
         );
         let signature = client.send_and_confirm_transaction(&tx).unwrap();
 
-        println!("New transaction was added to the proposal: {:?}", signature);
-
-        proposal_tx_index += 1;
+        info!(
+            "Proposal was signed off: {:?}\nWe are ready for voting",
+            signature
+        );
     }
-
-    let sign_off_proposal = sign_off_proposal(
-        &governance_program,
-        &governance_data.realm,
-        &governance_key,
-        &proposal_address,
-        &signer.try_pubkey().unwrap(),
-        None,
-    );
-
-    let blockhash = client.get_latest_blockhash().unwrap();
-
-    let tx = Transaction::new_signed_with_payer(
-        &[sign_off_proposal],
-        Some(&signer.try_pubkey().unwrap()),
-        &[&*signer],
-        blockhash,
-    );
-    let signature = client.send_and_confirm_transaction(&tx).unwrap();
-
-    println!("Proposal was signed off: {:?}", signature);
 }
 
-fn keypair_or_ledger_of(path: &PathBuf) -> Box<dyn Signer> {
+fn keypair_or_ledger_of(path: &Path) -> Box<dyn Signer> {
     return if path.starts_with("usb://") {
         let uri_invalid_msg =
             "Failed to parse usb:// keypair path. It must be of the form 'usb://ledger?key=0'.";
