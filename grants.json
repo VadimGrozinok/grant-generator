@@ -1,12 +1,12 @@
 {
-    "name": "Bla",
-    "description": "Blabla",
+    "name": "",
+    "description": "",
     "grants": [
         {
-            "wallet": "",
-            "grant_type": "None",
+            "wallet": "address",
+            "grant_type": "",
             "start": null,
-            "periods": 0,
+            "periods": 1,
             "allow_clawback": true,
             "amount": 1000000
         }

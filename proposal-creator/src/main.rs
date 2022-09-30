@@ -17,8 +17,8 @@ use solana_sdk::{
 };
 use spl_governance::{
     instruction::{
-        add_signatory, create_proposal as create_proposal_instruction, insert_transaction,
-        sign_off_proposal,
+        add_signatory, create_proposal as create_proposal_instruction, execute_transaction,
+        insert_transaction, sign_off_proposal,
     },
     state::{
         governance::GovernanceV2,
@@ -73,7 +73,6 @@ pub struct TransactionsToExecute {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProposalTransaction {
     pub address: String,
-    pub transaction_program_id: String,
     pub instruction: Vec<u8>,
 }
 
@@ -114,9 +113,17 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommand(
+            Command::new("execute")
+                .about("execute proposal transactions")
+                .arg(
+                    arg!(-t --transactions "lists of transactions to be executed")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
         .get_matches();
     // TODO: add retry command
-    // TODO: add execute command
 
     let wallet_path = matches.get_one::<PathBuf>("wallet").unwrap();
 
@@ -133,7 +140,17 @@ fn main() {
 
         let grants: ProposalData = serde_json::from_str(&grants_data).unwrap();
 
-        create_proposal(&client, signer, &grants);
+        create_proposal(&client, &*signer, &grants);
+    }
+
+    if let Some(matches) = matches.subcommand_matches("execute") {
+        let transactions_file = matches.get_one::<String>("transactions").unwrap();
+
+        let transactions_data = fs::read_to_string(transactions_file).unwrap();
+
+        let transactions: TransactionsToExecute = serde_json::from_str(&transactions_data).unwrap();
+
+        execute_proposal(&client, &*signer, &transactions);
     }
 }
 
@@ -152,7 +169,7 @@ fn send_tx_with_retry(client: &RpcClient, signer: &dyn Signer, instruction: Inst
             let signature = client.send_and_confirm_transaction(&tx).ok();
 
             if let Some(signature) = signature {
-                info!("New transaction was added to the proposal: {:?}", signature);
+                info!("Transaction sent successfully: {:?}", signature);
                 return true;
             } else {
                 info!("Retrying send transaction...");
@@ -168,7 +185,7 @@ fn send_tx_with_retry(client: &RpcClient, signer: &dyn Signer, instruction: Inst
     false
 }
 
-fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalData) {
+fn create_proposal(client: &RpcClient, signer: &dyn Signer, data: &ProposalData) {
     let governance_program = Pubkey::from_str(&env::var("GOVERNANCE_PROGRAM").unwrap()).unwrap();
     let governance_key = Pubkey::from_str(&env::var("GOVERNANCE").unwrap()).unwrap();
     let council_mint = Pubkey::from_str(&env::var("COUNCIL_MINT").unwrap()).unwrap();
@@ -244,7 +261,6 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
 
     for grant in data.grants.iter() {
         let instruction: Instruction = bincode::deserialize(&grant.instruction).unwrap();
-        let transaction_program_id = instruction.program_id.to_string();
         let instruction_data = InstructionData::from(instruction);
 
         let insert_instruction = insert_transaction(
@@ -260,6 +276,7 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
             vec![instruction_data],
         );
 
+        info!("Adding new transaction to the proposal...");
         let tx_sent = send_tx_with_retry(client, &*signer, insert_instruction);
 
         if tx_sent {
@@ -274,7 +291,6 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
 
             proposal_transactions.push(ProposalTransaction {
                 address: transaction_address.to_string(),
-                transaction_program_id,
                 instruction: grant.instruction.clone(),
             });
         } else {
@@ -336,6 +352,66 @@ fn create_proposal(client: &RpcClient, signer: Box<dyn Signer>, data: &ProposalD
             "Proposal was signed off: {:?}\nWe are ready for voting",
             signature
         );
+    }
+}
+
+fn execute_proposal(client: &RpcClient, signer: &dyn Signer, data: &TransactionsToExecute) {
+    let governance_program = Pubkey::from_str(&env::var("GOVERNANCE_PROGRAM").unwrap()).unwrap();
+    let governance_key = Pubkey::from_str(&data.governance).unwrap();
+    let proposal_key = Pubkey::from_str(&data.proposal).unwrap();
+
+    let number_of_transactions = data.transactions.len();
+
+    let mut error_happen = false;
+
+    let mut erroneous_transactions = Vec::new();
+
+    for (index, transaction) in data.transactions.iter().enumerate() {
+        let address = Pubkey::from_str(&transaction.address).unwrap();
+        let mut instruction: Instruction = bincode::deserialize(&transaction.instruction).unwrap();
+
+        instruction.accounts.get_mut(6).unwrap().is_signer = false;
+        instruction.accounts.get_mut(7).unwrap().is_signer = false;
+
+        println!("Instruction accounts:\n{:?}", &instruction.accounts);
+
+        let execute_instruction = execute_transaction(
+            &governance_program,
+            &governance_key,
+            &proposal_key,
+            &address,
+            &instruction.program_id,
+            &instruction.accounts,
+        );
+
+        info!(
+            "Executing proposal transaction, {} of {}...",
+            index + 1,
+            number_of_transactions
+        );
+        let tx_sent = send_tx_with_retry(client, &*signer, execute_instruction);
+
+        if !tx_sent {
+            error_happen = true;
+
+            erroneous_transactions.push(transaction.clone());
+        }
+    }
+
+    if error_happen {
+        warn!("Not all transactions were executed successfully");
+
+        let txs_to_execute = TransactionsToExecute {
+            governance: data.governance.clone(),
+            proposal: data.proposal.clone(),
+            transactions: erroneous_transactions,
+        };
+
+        let j = serde_json::to_string(&txs_to_execute).unwrap();
+
+        fs::write("../erroneous_proposal_txs.json", j).unwrap();
+
+        info!("Failed transactions were saved to erroneous_proposal_txs.json");
     }
 }
 
