@@ -1,24 +1,14 @@
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use borsh::{BorshDeserialize, BorshSchema, BorshSerialize};
-use clap::crate_description;
 use clap::{arg, command, value_parser, ArgAction, Command};
 use serde::{Deserialize, Serialize};
-use solana_remote_wallet::locator::Locator;
-use solana_remote_wallet::remote_keypair::generate_remote_keypair;
-use solana_remote_wallet::remote_wallet::maybe_wallet_manager;
-use solana_sdk::derivation_path::DerivationPath;
-use solana_sdk::{
-    self, commitment_config::CommitmentConfig, signature::Keypair, signature::Signer,
-    signer::keypair::read_keypair_file, transaction::Transaction as SolanaTransaction,
-};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     system_program,
     sysvar::rent,
 };
-use uriparse::URIReference;
 use voter_stake_registry::state::LockupKind;
 
 use dotenv::dotenv;
@@ -153,8 +143,6 @@ fn main() {
         )
         .get_matches();
 
-    let wallet_path = matches.get_one::<PathBuf>("wallet").unwrap();
-
     if let Some(matches) = matches.subcommand_matches("grant") {
         let grants_file = matches.get_one::<String>("grants").unwrap();
 
@@ -176,7 +164,7 @@ fn main() {
     }
 }
 
-pub fn grant_instructions(grants: &Vec<Grant>) -> Vec<GrantInstruction> {
+pub fn grant_instructions(grants: &[Grant]) -> Vec<GrantInstruction> {
     let voter_stake_program = Pubkey::from_str(&env::var("VOTER_STAKE_PROGRAM").unwrap()).unwrap();
 
     let mint = Pubkey::from_str(&env::var("MINT").unwrap()).unwrap();
