@@ -166,15 +166,19 @@ fn send_tx_with_retry(client: &RpcClient, signer: &dyn Signer, instruction: Inst
                 blockhash,
             );
 
-            let signature = client.send_and_confirm_transaction(&tx).ok();
+            let signature = client.send_and_confirm_transaction(&tx);
 
-            if let Some(signature) = signature {
-                info!("Transaction sent successfully: {:?}", signature);
-                return true;
-            } else {
-                info!("Retrying send transaction...");
-                count -= 1;
-                continue;
+            match signature {
+                Ok(signature) => {
+                    info!("Transaction sent successfully: {:?}", signature);
+                    return true;
+                }
+                Err(e) => {
+                    error!("Error has happened: {:?}", e);
+                    info!("Retrying send transaction...");
+                    count -= 1;
+                    continue;
+                }
             }
         } else {
             info!("Retrying get latest blockhash...");
@@ -372,8 +376,6 @@ fn execute_proposal(client: &RpcClient, signer: &dyn Signer, data: &Transactions
 
         instruction.accounts.get_mut(6).unwrap().is_signer = false;
         instruction.accounts.get_mut(7).unwrap().is_signer = false;
-
-        println!("Instruction accounts:\n{:?}", &instruction.accounts);
 
         let execute_instruction = execute_transaction(
             &governance_program,
