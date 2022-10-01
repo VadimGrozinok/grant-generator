@@ -73,6 +73,8 @@ Data in `grants.json` should look like this:
 
 There is a shell script to work with Rust CLI, it is responsible for compiling and running programs.
 
+> **Note**
+>
 > Before run shell script do `chmod +x run.sh`
 
 Script has two commands: create-proposal & execute.
@@ -100,21 +102,8 @@ Once proposal created it's time to execute all the proposal transactions. For th
 -n - node, link to Solana RPC, by default https://api.mainnet-beta.solana.com/
 ```
 
-As a result we will receive `transactions.json` file with content like this:
+After all job done in a terminal we will see status of execution.
 
-``` json
-[
-    {
-        "wallet":"address",
-        "grant_type":"Daily",
-        "start":null,
-        "periods":1,
-        "allow_clawback":true,
-        "amount":2000000,
-        "tx":"base64 string"}
-]
-```
-
-Where `tx` is what we actually need to create custom instruction at DAO
+If during the process something went wrong all the failed transactions with be saved to erroneous_txs.json. That file can be used to retry proposal execution.
 
 ✌️
