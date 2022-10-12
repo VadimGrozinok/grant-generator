@@ -87,6 +87,12 @@ pub struct ErroneousProposalTransactions {
     pub instruction: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WithdrawInstruction {
+    pub wallet: String,
+    pub instruction: Vec<u8>,
+}
+
 fn main() {
     dotenv().ok();
     env_logger::init();
@@ -122,8 +128,16 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommand(
+            Command::new("execute-withdraw")
+                .about("execute withdraw transactions")
+                .arg(
+                    arg!(-i --instruction "withdraw instruction to be executed")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
         .get_matches();
-    // TODO: add retry command
 
     let wallet_path = matches.get_one::<PathBuf>("wallet").unwrap();
 
@@ -151,6 +165,16 @@ fn main() {
         let transactions: TransactionsToExecute = serde_json::from_str(&transactions_data).unwrap();
 
         execute_proposal(&client, &*signer, &transactions);
+    }
+
+    if let Some(matches) = matches.subcommand_matches("execute-withdraw") {
+        let instruction_file = matches.get_one::<String>("instruction").unwrap();
+
+        let instruction_data = fs::read_to_string(instruction_file).unwrap();
+
+        let instruction: WithdrawInstruction = serde_json::from_str(&instruction_data).unwrap();
+
+        execute_withdraw(&client, &*signer, &instruction);
     }
 }
 
@@ -415,6 +439,49 @@ fn execute_proposal(client: &RpcClient, signer: &dyn Signer, data: &Transactions
 
         info!("Failed transactions were saved to erroneous_proposal_txs.json");
     }
+}
+
+fn execute_withdraw(client: &RpcClient, signer: &dyn Signer, data: &WithdrawInstruction) {
+    let blockhash = client.get_latest_blockhash().unwrap();
+
+    let instruction: Instruction = bincode::deserialize(&data.instruction).unwrap();
+
+    let mint = Pubkey::from_str(&env::var("MINT").unwrap()).unwrap();
+
+    let associated_token_address =
+        spl_associated_token_account::get_associated_token_address(&signer.pubkey(), &mint);
+
+    let tx = if client
+        .get_token_account(&associated_token_address)
+        .unwrap()
+        .is_some()
+    {
+        Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&signer.try_pubkey().unwrap()),
+            &[&*signer],
+            blockhash,
+        )
+    } else {
+        let create_token_instr =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &signer.pubkey(),
+                &signer.pubkey(),
+                &mint,
+                &spl_token::id(),
+            );
+
+        Transaction::new_signed_with_payer(
+            &[create_token_instr, instruction],
+            Some(&signer.try_pubkey().unwrap()),
+            &[&*signer],
+            blockhash,
+        )
+    };
+
+    let signature = client.send_and_confirm_transaction(&tx).unwrap();
+
+    info!("Tokens withdrawn successfully: {:?}", signature);
 }
 
 fn keypair_or_ledger_of(path: &Path) -> Box<dyn Signer> {
