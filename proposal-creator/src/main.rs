@@ -451,11 +451,7 @@ fn execute_withdraw(client: &RpcClient, signer: &dyn Signer, data: &WithdrawInst
     let associated_token_address =
         spl_associated_token_account::get_associated_token_address(&signer.pubkey(), &mint);
 
-    let tx = if client
-        .get_token_account(&associated_token_address)
-        .unwrap()
-        .is_some()
-    {
+    let tx = if let Ok(_result) = client.get_token_account_balance(&associated_token_address) {
         Transaction::new_signed_with_payer(
             &[instruction],
             Some(&signer.try_pubkey().unwrap()),
